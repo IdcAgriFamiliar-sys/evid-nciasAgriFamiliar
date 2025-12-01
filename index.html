@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SIGAF - Sistema Integrado de Gestão da Agricultura Familiar</title>
+    <!-- Tailwind CSS CDN para estilização responsiva -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Configuração do Google Font Inter -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+        /* Estilos adicionais para melhor visualização */
+        .glass-card {
+            background-color: rgba(255, 255, 255, 0.9);
+            backdrop-filter: blur(10px);
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1), 0 1px 3px rgba(0, 0, 0, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+    </style>
+    
+    <!-- React, ReactDOM e Babel CDNs -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    
+    <!-- Firebase CDNs -->
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+</head>
+<body class="bg-gray-100 min-h-screen">
+
+    <div id="root">
+        <!-- O React irá renderizar o aplicativo aqui -->
+    </div>
+
+    <script type="text/babel">
+        // Importa React hooks (equivalente a import { useState, useEffect } from 'react')
+        const { useState, useEffect, useCallback } = React;
+
+        // =========================================================================
+        // Configuração do Ambiente e Firebase
+        // =========================================================================
+        
+        // Variáveis globais de ambiente (usadas na plataforma Canvas/Firebase)
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {
+            // Configuração Firebase padrão (mock para desenvolvimento local)
+            apiKey: "YOUR_API_KEY",
+            authDomain: "YOUR_PROJECT_ID.firebaseapp.com",
+            projectId: "YOUR_PROJECT_ID",
+            storageBucket: "YOUR_PROJECT_ID.appspot.com",
+            messagingSenderId: "SENDER_ID",
+            appId: "APP_ID"
+        };
+        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+
+        let app, db, auth;
+        
+        try {
+            // Inicializa o Firebase
+            app = firebase.initializeApp(firebaseConfig);
+            db = firebase.firestore(app);
+            auth = firebase.auth(app);
+            // Configuração de debug para Firestore
+            firebase.firestore.setLogLevel('debug');
+        } catch (error) {
+            console.error("Erro ao inicializar Firebase:", error);
+        }
+        
+        // =========================================================================
+        // Funções de Utilidade para Firestore
+        // =========================================================================
+        
+        /**
+         * Constrói o caminho para a coleção de tarefas de um usuário.
+         * Os dados são privados (por usuário).
+         * @param {string} userId - O ID do usuário logado.
+         * @returns {string} O caminho completo da coleção.
+         */
+        const getCollectionPath = (userId) => {
+            if (!userId) return null;
+            // Caminho: /artifacts/{appId}/users/{userId}/sigaf_tasks
+            return `artifacts/${appId}/users/${userId}/sigaf_tasks`;
+        };
+
+        // =========================================================================
+        // Componente Principal do Aplicativo (App)
+        // =========================================================================
+
+        const App = () => {
+            const [authState, setAuthState] = useState({
+                userId: null,
+                isAuthReady: false,
+                userEmail: null,
+                loading: true,
+            });
+            const [tasks, setTasks] = useState([]);
+            const [newTaskTitle, setNewTaskTitle] = useState('');
+            const [newTaskDescription, setNewTaskDescription] = useState('');
+            const [loadingData, setLoadingData] = useState(false);
+            const [error, setError] = useState(null);
+            const [isModalOpen, setIsModalOpen] = useState(false);
+            const [modalContent, setModalContent] = useState({ title: '', message: '' });
+
+            // Função para mostrar um modal customizado (em vez de alert())
+            const showModal = (title, message) => {
+                setModalContent({ title, message });
+                setIsModalOpen(true);
+            };
+
+            // 1. Efeito para Inicialização de Autenticação e Listener
+            useEffect(() => {
+                if (!auth) return;
+
+                const unsubscribe = auth.onAuthStateChanged(async (user) => {
+                    if (user) {
+                        setAuthState({
+                            userId: user.uid,
+                            isAuthReady: true,
+                            userEmail: user.email,
+                            loading: false
+                        });
+                    } else {
+                        try {
+                            // Tenta logar com o token customizado
+                            if (initialAuthToken) {
+                                await auth.signInWithCustomToken(initialAuthToken);
+                            } else {
+                                // Fallback para login anônimo
+                                await auth.signInAnonymously();
+                            }
+                        } catch (e) {
+                            console.error("Erro no login Firebase:", e);
+                            setError("Falha na autenticação. Tente recarregar a página.");
+                            setAuthState(prev => ({ ...prev, isAuthReady: true, loading: false }));
+                        }
+                    }
+                });
+
+                return () => unsubscribe();
+            }, []); // Roda apenas na montagem do componente
+
+            // 2. Efeito para Listener de Dados do Firestore (onSnapshot)
+            useEffect(() => {
+                if (!db || !authState.isAuthReady || !authState.userId) {
+                    // Não tenta buscar dados antes da autenticação
+                    return;
+                }
+                
+                setLoadingData(true);
+                const path = getCollectionPath(authState.userId);
+                const tasksRef = db.collection(path);
+
+                // Configura o listener em tempo real
+                const unsubscribe = tasksRef.onSnapshot((snapshot) => {
+                    const fetchedTasks = [];
+                    snapshot.forEach(doc => {
+                        const data = doc.data();
+                        fetchedTasks.push({
+                            id: doc.id,
+                            ...data,
+                            // Garante que o campo de data está formatado
+                            createdAt: data.createdAt ? data.createdAt.toDate().toLocaleDateString('pt-BR') : 'N/A'
+                        });
+                    });
+                    // Ordena pela data de criação (em memória, para evitar índices do Firestore)
+                    fetchedTasks.sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt));
+                    setTasks(fetchedTasks);
+                    setLoadingData(false);
+                }, (err) => {
+                    console.error("Erro ao carregar tarefas:", err);
+                    setError("Erro ao carregar tarefas do banco de dados.");
+                    setLoadingData(false);
+                });
+
+                // Limpa o listener ao desmontar ou quando o userId/authState mudar
+                return () => unsubscribe();
+            }, [authState.userId, authState.isAuthReady]); // Depende do userId e da prontidão da autenticação
+            
+            // =========================================================================
+            // Funções CRUD
+            // =========================================================================
+
+            // Adicionar nova tarefa
+            const handleAddTask = async (e) => {
+                e.preventDefault();
+                if (!newTaskTitle.trim() || !authState.userId) return;
+
+                const path = getCollectionPath(authState.userId);
+                try {
+                    setLoadingData(true);
+                    await db.collection(path).add({
+                        title: newTaskTitle.trim(),
+                        description: newTaskDescription.trim(),
+                        completed: false,
+                        createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+                    });
+                    setNewTaskTitle('');
+                    setNewTaskDescription('');
+                    showModal('Sucesso!', 'Atividade adicionada com sucesso.');
+                } catch (e) {
+                    console.error("Erro ao adicionar documento: ", e);
+                    setError("Não foi possível adicionar a tarefa.");
+                } finally {
+                    setLoadingData(false);
+                }
+            };
+
+            // Alternar status de conclusão
+            const handleToggleTask = async (id, completed) => {
+                if (!authState.userId) return;
+
+                const path = getCollectionPath(authState.userId);
+                const docRef = db.collection(path).doc(id);
+                try {
+                    await docRef.update({ completed: !completed });
+                } catch (e) {
+                    console.error("Erro ao atualizar documento: ", e);
+                    setError("Não foi possível atualizar o status da tarefa.");
+                }
+            };
+
+            // Deletar tarefa
+            const handleDeleteTask = async (id) => {
+                if (!authState.userId) return;
+
+                // Não usamos confirm(), mas sim um modal customizado
+                showModal('Confirmação', 'Tem certeza de que deseja deletar esta atividade?');
+                
+                // Simulação de ação após confirmação (em uma implementação real, o modal teria botões Sim/Não)
+                const confirmed = true; // Assumindo confirmação para fins de exemplo
+                
+                if (confirmed) {
+                    const path = getCollectionPath(authState.userId);
+                    const docRef = db.collection(path).doc(id);
+                    try {
+                        await docRef.delete();
+                    } catch (e) {
+                        console.error("Erro ao deletar documento: ", e);
+                        setError("Não foi possível deletar a tarefa.");
+                    }
+                }
+            };
+            
+            // =========================================================================
+            // Renderização da UI
+            // =========================================================================
+
+            if (authState.loading) {
+                return (
+                    <div className="flex items-center justify-center min-h-screen">
+                        <div className="flex flex-col items-center p-6 glass-card rounded-xl">
+                            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-green-500 mb-3"></div>
+                            <p className="text-gray-700">Carregando aplicação...</p>
+                        </div>
+                    </div>
+                );
+            }
+
+            const headerBg = "bg-green-600 shadow-lg";
+
+            return (
+                <div className="min-h-screen bg-gray-50 flex flex-col items-center">
+                    
+                    {/* Modal Customizado (Substitui alert/confirm) */}
+                    {isModalOpen && (
+                        <div className="fixed inset-0 bg-gray-900 bg-opacity-50 flex items-center justify-center z-50 p-4">
+                            <div className="bg-white p-6 rounded-xl shadow-2xl max-w-sm w-full">
+                                <h3 className="text-xl font-bold mb-3 text-green-700">{modalContent.title}</h3>
+                                <p className="text-gray-700 mb-6">{modalContent.message}</p>
+                                <button
+                                    onClick={() => setIsModalOpen(false)}
+                                    className="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-lg transition duration-200"
+                                >
+                                    Entendi
+                                </button>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* Cabeçalho */}
+                    <header className={`w-full ${headerBg} p-4 mb-8 sticky top-0 z-10`}>
+                        <div className="max-w-4xl mx-auto flex justify-between items-center">
+                            <h1 className="text-2xl font-extrabold text-white tracking-wider">
+                                SIGAF
+                            </h1>
+                            <div className="text-right">
+                                <p className="text-sm font-medium text-green-200">ID de Usuário: <span className="font-mono">{authState.userId}</span></p>
+                                {authState.userEmail && <p className="text-xs text-green-200">{authState.userEmail}</p>}
+                            </div>
+                        </div>
+                    </header>
+
+                    {/* Container Principal */}
+                    <main className="w-full max-w-4xl px-4 pb-8">
+                        
+                        {/* Seção de Adicionar Tarefa */}
+                        <div className="glass-card p-6 rounded-2xl mb-8">
+                            <h2 className="text-xl font-semibold mb-4 text-green-700">Nova Atividade ou Planejamento</h2>
+                            <form onSubmit={handleAddTask} className="space-y-4">
+                                <div>
+                                    <label htmlFor="title" className="block text-sm font-medium text-gray-700">Título (Ex: Plantio de Milho)</label>
+                                    <input
+                                        id="title"
+                                        type="text"
+                                        value={newTaskTitle}
+                                        onChange={(e) => setNewTaskTitle(e.target.value)}
+                                        placeholder="O que precisa ser feito?"
+                                        required
+                                        className="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-green-500 focus:ring-green-500 p-2"
+                                    />
+                                </div>
+                                <div>
+                                    <label htmlFor="description" className="block text-sm font-medium text-gray-700">Descrição (Detalhes, insumos, local)</label>
+                                    <textarea
+                                        id="description"
+                                        value={newTaskDescription}
+                                        onChange={(e) => setNewTaskDescription(e.target.value)}
+                                        placeholder="Detalhes, insumos necessários, local da atividade..."
+                                        rows="3"
+                                        className="mt-1 block w-full border-gray-300 rounded-lg shadow-sm focus:border-green-500 focus:ring-green-500 p-2"
+                                    ></textarea>
+                                </div>
+                                <button
+                                    type="submit"
+                                    disabled={loadingData}
+                                    className="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-lg transition duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+                                >
+                                    {loadingData ? 'Salvando...' : 'Adicionar Atividade'}
+                                </button>
+                            </form>
+                        </div>
+                        
+                        {/* Mensagens de Status */}
+                        {error && (
+                            <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 rounded-lg mb-6" role="alert">
+                                <p className="font-bold">Erro</p>
+                                <p>{error}</p>
+                            </div>
+                        )}
+
+                        {loadingData && (
+                            <div className="flex items-center justify-center p-4">
+                                <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-green-500 mr-3"></div>
+                                <p className="text-gray-600">Atualizando dados...</p>
+                            </div>
+                        )}
+
+                        {/* Seção de Lista de Tarefas */}
+                        <div className="glass-card p-6 rounded-2xl">
+                            <h2 className="text-xl font-semibold mb-4 text-green-700">Atividades Pendentes ({tasks.filter(t => !t.completed).length})</h2>
+                            
+                            {tasks.length === 0 ? (
+                                <p className="text-gray-500 italic">Nenhuma atividade registrada ainda. Adicione uma acima!</p>
+                            ) : (
+                                <ul className="space-y-3">
+                                    {tasks.map((task) => (
+                                        <li key={task.id} className={`p-4 rounded-xl shadow-md flex justify-between items-start transition duration-300 ${task.completed ? 'bg-gray-200 border-l-4 border-green-500 opacity-70' : 'bg-white border-l-4 border-yellow-500 hover:shadow-lg'}`}>
+                                            <div className="flex-1 min-w-0">
+                                                <div className="flex items-center mb-1">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={task.completed}
+                                                        onChange={() => handleToggleTask(task.id, task.completed)}
+                                                        className="h-5 w-5 text-green-600 border-gray-300 rounded focus:ring-green-500 cursor-pointer"
+                                                    />
+                                                    <span className={`ml-3 text-lg font-medium break-words ${task.completed ? 'line-through text-gray-500' : 'text-gray-800'}`}>
+                                                        {task.title}
+                                                    </span>
+                                                </div>
+                                                <p className="text-sm text-gray-600 mt-1 pl-8 italic break-words">{task.description || 'Sem descrição.'}</p>
+                                                <p className="text-xs text-gray-400 mt-2 pl-8">Criado em: {task.createdAt}</p>
+                                            </div>
+                                            
+                                            <button
+                                                onClick={() => handleDeleteTask(task.id)}
+                                                className="ml-4 p-2 text-red-500 hover:text-red-700 rounded-full transition duration-150"
+                                                title="Deletar Atividade"
+                                            >
+                                                {/* Ícone de Lixeira (SVG inline) */}
+                                                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="lucide lucide-trash-2"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></svg>
+                                            </button>
+                                        </li>
+                                    ))}
+                                </ul>
+                            )}
+                        </div>
+
+                    </main>
+                </div>
+            );
+        };
+
+        // Renderiza o aplicativo no DOM
+        const container = document.getElementById('root');
+        const root = ReactDOM.createRoot(container);
+        root.render(<App />);
+
+    </script>
+</body>
+</html>
