@@ -1,3 +1,4 @@
+import React, { useState, useEffect } from 'react';
 import { initializeApp } from 'firebase/app';
 import {
   getAuth,
@@ -19,6 +20,7 @@ import {
 } from 'firebase/firestore';
 
 // --- Variáveis Globais (Fornecidas pelo Ambiente Canvas) ---
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
 const firebaseConfig = typeof __firebase_config !== 'undefined'
   ? JSON.parse(__firebase_config)
   : {};
