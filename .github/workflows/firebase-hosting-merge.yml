@@ -20,7 +20,6 @@ import {
 } from 'firebase/firestore';
 
 // --- Variáveis Globais (Fornecidas pelo Ambiente Canvas) ---
-
 const firebaseConfig = typeof __firebase_config !== 'undefined'
   ? JSON.parse(__firebase_config)
   : {};
